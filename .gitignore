@@ -1,1 +1,29 @@
-node_modules
+# Dependencies
+node_modules/
+pnpm-lock.yaml
+
+# Environment
+.env
+.env.local
+
+# AOS
+.aos/
+aos.db
+
+# Logs
+*.log
+logs/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
