@@ -7,6 +7,9 @@ local json = require('json')
 -- RandAO Module Integration
 local randomModule = require('@randao/random')(json)
 
+-- Apus AI Module Integration
+local ApusAI = require("@apus/ai-lib")
+
 -- ============================================================================
 -- GLOBAL STATE INITIALIZATION
 -- ============================================================================
@@ -15,7 +18,7 @@ State = State or {
     -- Process metadata
     name = "TruthFi Core",
     version = "1.0.0",
-    phase = "2-2-sbt-issuance-system",
+    phase = "3-1-apus-ai-integration",
     admin = Owner or "",
     
     -- QF Calculator Process integration
@@ -97,8 +100,27 @@ State = State or {
         auto_issue = true  -- Automatically issue SBT when Lucky Number is ready
     },
     
-    -- AI evaluation prompt template (for Phase 3)
-    ai_prompt_template = ""
+    -- AI evaluation system
+    ai_system = {
+        enabled = true,
+        evaluation_in_progress = false,
+        last_evaluation = nil,
+        evaluation_results = {},  -- Store AI evaluation results
+        pending_evaluations = {},  -- Track pending AI requests
+        request_count = 0
+    },
+    
+    -- AI evaluation prompt template
+    ai_prompt_template = [[
+Please comprehensively evaluate the truthfulness of the following tweet and its related information.
+Respond with a score from 0 to 1 (1=completely true, 0=completely false).
+
+{MAIN_TWEET_DATA}
+{REFERENCE_TWEETS_DATA}
+
+Consider account reliability (follower count, verification status) and engagement numbers,
+and respond with only the numerical score.
+]]
 }
 
 -- ============================================================================
@@ -549,6 +571,264 @@ local function getSBTStatistics()
         eligible_users = eligible_count,
         collection_id = State.sbt_config.collection_id,
         asset_source = State.sbt_config.asset_src
+    }
+end
+
+-- ============================================================================
+-- APUS AI EVALUATION FUNCTIONS
+-- ============================================================================
+
+-- Build AI evaluation prompt from tweet data
+local function buildAIPrompt(tweet_case)
+    if not tweet_case or not tweet_case.main_tweet then
+        return nil
+    end
+    
+    -- Format main tweet data
+    local main_tweet = tweet_case.main_tweet
+    local main_tweet_data = string.format([[
+Main Tweet:
+  Username: @%s %s
+  Content: "%s"
+  Posted: %s
+  Engagement: %d likes, %d retweets
+  Account: %d followers, %s
+]], 
+        main_tweet.username,
+        main_tweet.verified and "✓" or "",
+        main_tweet.content,
+        main_tweet.posted_at,
+        main_tweet.likes,
+        main_tweet.retweets,
+        main_tweet.followers,
+        main_tweet.verified and "verified" or "not verified"
+    )
+    
+    -- Format reference tweets data
+    local reference_tweets_data = ""
+    if tweet_case.reference_tweets and #tweet_case.reference_tweets > 0 then
+        reference_tweets_data = "\nReference Tweets:\n"
+        for i, ref_tweet in ipairs(tweet_case.reference_tweets) do
+            reference_tweets_data = reference_tweets_data .. string.format([[
+  %d. @%s %s: "%s"
+     Posted: %s | %d likes, %d retweets | %d followers, %s
+]], 
+                i,
+                ref_tweet.username,
+                ref_tweet.verified and "✓" or "",
+                ref_tweet.content,
+                ref_tweet.posted_at,
+                ref_tweet.likes,
+                ref_tweet.retweets,
+                ref_tweet.followers,
+                ref_tweet.verified and "verified" or "not verified"
+            )
+        end
+    else
+        reference_tweets_data = "\nReference Tweets: None"
+    end
+    
+    -- Replace placeholders in template
+    local prompt = State.ai_prompt_template:gsub("{MAIN_TWEET_DATA}", main_tweet_data)
+    prompt = prompt:gsub("{REFERENCE_TWEETS_DATA}", reference_tweets_data)
+    
+    return prompt
+end
+
+-- Process AI evaluation response
+local function processAIResponse(task_ref, ai_response, error_info)
+    local pending_eval = State.ai_system.pending_evaluations[task_ref]
+    if not pending_eval then
+        print("ApusAI: Received response for unknown task: " .. task_ref)
+        return false
+    end
+    
+    if error_info then
+        print("ApusAI: Evaluation failed - " .. (error_info.message or "Unknown error"))
+        -- Remove from pending
+        State.ai_system.pending_evaluations[task_ref] = nil
+        State.ai_system.evaluation_in_progress = false
+        return false
+    end
+    
+    -- Parse AI score (should be 0-1)
+    local ai_score = tonumber(ai_response.data)
+    if not ai_score or ai_score < 0 or ai_score > 1 then
+        print("ApusAI: Invalid AI score received: " .. tostring(ai_response.data))
+        State.ai_system.pending_evaluations[task_ref] = nil
+        State.ai_system.evaluation_in_progress = false
+        return false
+    end
+    
+    -- Convert to percentages
+    local true_confidence = ai_score * 100
+    local fake_confidence = (1 - ai_score) * 100
+    
+    -- Create evaluation result
+    local evaluation_result = {
+        ai_score = ai_score,
+        true_confidence = true_confidence,
+        fake_confidence = fake_confidence,
+        raw_response = ai_response.data,
+        session_id = ai_response.session,
+        attestation = ai_response.attestation,
+        task_ref = task_ref,
+        case_id = pending_eval.case_id,
+        evaluation_timestamp = os.time(),
+        prompt_used = pending_eval.prompt
+    }
+    
+    -- Store result
+    State.ai_system.evaluation_results = evaluation_result
+    State.ai_system.last_evaluation = os.time()
+    State.active_tweet.ai_confidence = ai_score
+    
+    -- Remove from pending
+    State.ai_system.pending_evaluations[task_ref] = nil
+    State.ai_system.evaluation_in_progress = false
+    
+    print("ApusAI: Evaluation completed - True: " .. string.format("%.1f", true_confidence) .. "%, Fake: " .. string.format("%.1f", fake_confidence) .. "%")
+    
+    return evaluation_result
+end
+
+-- Start AI evaluation
+local function startAIEvaluation(tweet_case, force_reevaluate)
+    if not State.ai_system.enabled then
+        print("ApusAI: AI evaluation system is disabled")
+        return false, "AI evaluation system disabled"
+    end
+    
+    if State.ai_system.evaluation_in_progress and not force_reevaluate then
+        print("ApusAI: Evaluation already in progress")
+        return false, "Evaluation already in progress"
+    end
+    
+    if not tweet_case or not tweet_case.case_id then
+        tweet_case = State.active_tweet
+    end
+    
+    if not tweet_case or tweet_case.case_id == "" then
+        print("ApusAI: No tweet case available for evaluation")
+        return false, "No tweet case available"
+    end
+    
+    -- Build prompt
+    local prompt = buildAIPrompt(tweet_case)
+    if not prompt then
+        print("ApusAI: Failed to build AI prompt")
+        return false, "Failed to build prompt"
+    end
+    
+    -- Configure inference options
+    local options = {
+        max_tokens = 10,  -- We only need a numerical score
+        temp = 0.3,  -- Low temperature for consistent scoring
+        system_prompt = "You are a fact-checking AI. Respond only with a numerical score between 0 and 1.",
+        reference = "truthfi-eval-" .. tweet_case.case_id .. "-" .. os.time()
+    }
+    
+    -- Submit inference request
+    local success, task_ref = pcall(function()
+        return ApusAI.infer(prompt, options, function(err, res)
+            processAIResponse(task_ref, res, err)
+        end)
+    end)
+    
+    if success and task_ref then
+        -- Record pending evaluation
+        State.ai_system.pending_evaluations[task_ref] = {
+            case_id = tweet_case.case_id,
+            prompt = prompt,
+            options = options,
+            start_time = os.time()
+        }
+        
+        State.ai_system.evaluation_in_progress = true
+        State.ai_system.request_count = State.ai_system.request_count + 1
+        
+        print("ApusAI: Evaluation request submitted - Task: " .. task_ref)
+        return true, task_ref
+    else
+        print("ApusAI: Failed to submit evaluation request")
+        return false, "Failed to submit request"
+    end
+end
+
+-- Calculate Quadratic Funding voting percentages
+local function calculateQuadraticVoting()
+    local voting_data = {
+        true_votes = {
+            amounts = {},
+            voters = State.voting_stats.true_voters
+        },
+        fake_votes = {
+            amounts = {},
+            voters = State.voting_stats.fake_voters
+        }
+    }
+    
+    -- Collect amounts (each vote is 1 USDA)
+    for i = 1, State.voting_stats.true_voters do
+        table.insert(voting_data.true_votes.amounts, State.required_deposit)
+    end
+    
+    for i = 1, State.voting_stats.fake_voters do
+        table.insert(voting_data.fake_votes.amounts, State.required_deposit)
+    end
+    
+    -- Use QF Calculator if available
+    if State.qf_calculator_process ~= "" then
+        -- In real implementation, would call QF Calculator Process
+        -- For now, simulate QF calculation
+        local true_sqrt_sum = State.voting_stats.true_voters > 0 and math.sqrt(State.voting_stats.true_voters) * math.sqrt(safeToNumber(State.required_deposit) / 1000000000) or 0
+        local fake_sqrt_sum = State.voting_stats.fake_voters > 0 and math.sqrt(State.voting_stats.fake_voters) * math.sqrt(safeToNumber(State.required_deposit) / 1000000000) or 0
+        
+        local true_qf_score = true_sqrt_sum * true_sqrt_sum
+        local fake_qf_score = fake_sqrt_sum * fake_sqrt_sum
+        local total_qf = true_qf_score + fake_qf_score
+        
+        if total_qf > 0 then
+            return {
+                true_percentage = (true_qf_score / total_qf) * 100,
+                fake_percentage = (fake_qf_score / total_qf) * 100,
+                method = "quadratic_funding"
+            }
+        end
+    end
+    
+    -- Fallback to linear calculation
+    local total_votes = State.voting_stats.true_votes + State.voting_stats.fake_votes
+    if total_votes > 0 then
+        return {
+            true_percentage = (State.voting_stats.true_votes / total_votes) * 100,
+            fake_percentage = (State.voting_stats.fake_votes / total_votes) * 100,
+            method = "linear"
+        }
+    end
+    
+    return {
+        true_percentage = 0,
+        fake_percentage = 0,
+        method = "no_votes"
+    }
+end
+
+-- Get AI system statistics
+local function getAIStatistics()
+    local pending_count = 0
+    for _ in pairs(State.ai_system.pending_evaluations) do
+        pending_count = pending_count + 1
+    end
+    
+    return {
+        enabled = State.ai_system.enabled,
+        evaluation_in_progress = State.ai_system.evaluation_in_progress,
+        total_requests = State.ai_system.request_count,
+        pending_evaluations = pending_count,
+        last_evaluation_time = State.ai_system.last_evaluation,
+        has_current_result = State.ai_system.evaluation_results ~= nil and State.ai_system.evaluation_results.case_id == State.active_tweet.case_id,
+        current_ai_confidence = State.active_tweet.ai_confidence
     }
 end
 
@@ -1759,7 +2039,109 @@ Handlers.add(
 )
 
 -- ============================================================================
--- POOL MANAGEMENT HANDLERS
+-- APUS AI EVALUATION HANDLERS
+-- ============================================================================
+
+-- Handler: AI Evaluate (Start AI evaluation of current tweet case)
+Handlers.add(
+    "AI-Evaluate",
+    Handlers.utils.hasMatchingTag("Action", "AI-Evaluate"),
+    function(msg)
+        local force_reevaluate = msg.Tags["Force"] == "true"
+        
+        -- Check if there's an active tweet case
+        if State.active_tweet.case_id == "" then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "No active tweet case available for evaluation",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        -- Start AI evaluation
+        local success, result = startAIEvaluation(State.active_tweet, force_reevaluate)
+        
+        if success then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    message = "AI evaluation started",
+                    task_ref = result,
+                    case_id = State.active_tweet.case_id,
+                    note = "Evaluation results will be available shortly"
+                })
+            })
+        else
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "AI evaluation failed: " .. result,
+                    status = "error"
+                })
+            })
+        end
+    end
+)
+
+-- Handler: Get AI Analysis (Retrieve AI evaluation results)
+Handlers.add(
+    "Get-AI-Analysis",
+    Handlers.utils.hasMatchingTag("Action", "Get-AI-Analysis"),
+    function(msg)
+        local analysis_data = {
+            status = "success",
+            case_id = State.active_tweet.case_id,
+            case_title = State.active_tweet.title
+        }
+        
+        -- Check if we have current evaluation results
+        if State.ai_system.evaluation_results and 
+           State.ai_system.evaluation_results.case_id == State.active_tweet.case_id then
+            
+            analysis_data.ai_evaluation = {
+                available = true,
+                true_confidence = State.ai_system.evaluation_results.true_confidence,
+                fake_confidence = State.ai_system.evaluation_results.fake_confidence,
+                ai_score = State.ai_system.evaluation_results.ai_score,
+                evaluation_timestamp = State.ai_system.evaluation_results.evaluation_timestamp,
+                task_ref = State.ai_system.evaluation_results.task_ref
+            }
+        else
+            analysis_data.ai_evaluation = {
+                available = false,
+                reason = State.ai_system.evaluation_in_progress and "Evaluation in progress" or "No evaluation completed for current case",
+                evaluation_in_progress = State.ai_system.evaluation_in_progress
+            }
+        end
+        
+        -- Include AI system status
+        analysis_data.ai_system_status = getAIStatistics()
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(analysis_data)
+        })
+    end
+)
+
+-- Handler: Compare Results (Compare AI vs Human voting)
+Handlers.add(
+    "Compare-Results",
+    Handlers.utils.hasMatchingTag("Action", "Compare-Results"),
+    function(msg)
+        local comparison_data = {
+            status = "success",
+            case_id = State.active_tweet.case_id,
+            case_title = State.active_tweet.title,
+            comparison_timestamp = os.time()
+        }
+        
+        -- Get human voting results (with QF calculation)
+        local qf_results = calculateQuadraticVoting()\n        comparison_data.human_voting = {\n            true_percentage = math.floor(qf_results.true_percentage * 10 + 0.5) / 10,\n            fake_percentage = math.floor(qf_results.fake_percentage * 10 + 0.5) / 10,\n            method = qf_results.method,\n            voting_stats = State.voting_stats\n        }\n        \n        -- Get AI evaluation results\n        if State.ai_system.evaluation_results and \n           State.ai_system.evaluation_results.case_id == State.active_tweet.case_id then\n            \n            comparison_data.ai_evaluation = {\n                available = true,\n                true_confidence = math.floor(State.ai_system.evaluation_results.true_confidence * 10 + 0.5) / 10,\n                fake_confidence = math.floor(State.ai_system.evaluation_results.fake_confidence * 10 + 0.5) / 10,\n                raw_score = State.ai_system.evaluation_results.ai_score\n            }\n            \n            -- Calculate differences\n            local true_diff = comparison_data.ai_evaluation.true_confidence - comparison_data.human_voting.true_percentage\n            local fake_diff = comparison_data.ai_evaluation.fake_confidence - comparison_data.human_voting.fake_percentage\n            \n            comparison_data.comparison = {\n                true_difference = math.floor(true_diff * 10 + 0.5) / 10,\n                fake_difference = math.floor(fake_diff * 10 + 0.5) / 10,\n                agreement_level = math.abs(true_diff) < 10 and \"high\" or (math.abs(true_diff) < 25 and \"medium\" or \"low\"),\n                ai_more_confident_true = true_diff > 0,\n                ai_more_confident_fake = fake_diff > 0\n            }\n            \n            -- Determine consensus\n            local ai_verdict = comparison_data.ai_evaluation.true_confidence > 50 and \"true\" or \"fake\"\n            local human_verdict = comparison_data.human_voting.true_percentage > 50 and \"true\" or \"fake\"\n            comparison_data.consensus = {\n                ai_verdict = ai_verdict,\n                human_verdict = human_verdict,\n                agreement = ai_verdict == human_verdict,\n                confidence_gap = math.abs(comparison_data.ai_evaluation.true_confidence - comparison_data.human_voting.true_percentage)\n            }\n        else\n            comparison_data.ai_evaluation = {\n                available = false,\n                reason = \"No AI evaluation available for current case\"\n            }\n            \n            comparison_data.comparison = {\n                available = false,\n                note = \"AI evaluation required for comparison\"\n            }\n        end\n        \n        ao.send({\n            Target = msg.From,\n            Data = json.encode(comparison_data)\n        })\n    end\n)\n\n-- Handler: Set AI Prompt (Admin only)\nHandlers.add(\n    \"Set-AI-Prompt\",\n    Handlers.utils.hasMatchingTag(\"Action\", \"Set-AI-Prompt\"),\n    function(msg)\n        if msg.From ~= State.admin then\n            ao.send({\n                Target = msg.From,\n                Data = json.encode({\n                    error = \"Unauthorized: Admin access required\",\n                    status = \"error\"\n                })\n            })\n            return\n        end\n        \n        local new_prompt = msg.Data\n        if not new_prompt or new_prompt == \"\" then\n            ao.send({\n                Target = msg.From,\n                Data = json.encode({\n                    error = \"Prompt data is required\",\n                    status = \"error\"\n                })\n            })\n            return\n        end\n        \n        -- Validate prompt has required placeholders\n        if not string.find(new_prompt, \"{MAIN_TWEET_DATA}\") or not string.find(new_prompt, \"{REFERENCE_TWEETS_DATA}\") then\n            ao.send({\n                Target = msg.From,\n                Data = json.encode({\n                    error = \"Prompt must contain {MAIN_TWEET_DATA} and {REFERENCE_TWEETS_DATA} placeholders\",\n                    status = \"error\"\n                })\n            })\n            return\n        end\n        \n        State.ai_prompt_template = new_prompt\n        \n        ao.send({\n            Target = msg.From,\n            Data = json.encode({\n                status = \"success\",\n                message = \"AI prompt template updated successfully\",\n                prompt_length = #new_prompt\n            })\n        })\n    end\n)\n\n-- Handler: Get AI Prompt\nHandlers.add(\n    \"Get-AI-Prompt\",\n    Handlers.utils.hasMatchingTag(\"Action\", \"Get-AI-Prompt\"),\n    function(msg)\n        -- Build sample prompt with current tweet data\n        local sample_prompt = \"\"\n        if State.active_tweet.case_id ~= \"\" then\n            sample_prompt = buildAIPrompt(State.active_tweet)\n        end\n        \n        ao.send({\n            Target = msg.From,\n            Data = json.encode({\n                status = \"success\",\n                prompt_template = State.ai_prompt_template,\n                template_length = #State.ai_prompt_template,\n                sample_prompt = sample_prompt,\n                placeholders = {\n                    \"{MAIN_TWEET_DATA}\",\n                    \"{REFERENCE_TWEETS_DATA}\"\n                }\n            })\n        })\n    end\n)\n\n-- Handler: Toggle AI System (Admin only)\nHandlers.add(\n    \"Toggle-AI-System\",\n    Handlers.utils.hasMatchingTag(\"Action\", \"Toggle-AI-System\"),\n    function(msg)\n        if msg.From ~= State.admin then\n            ao.send({\n                Target = msg.From,\n                Data = json.encode({\n                    error = \"Unauthorized: Admin access required\",\n                    status = \"error\"\n                })\n            })\n            return\n        end\n        \n        State.ai_system.enabled = not State.ai_system.enabled\n        \n        ao.send({\n            Target = msg.From,\n            Data = json.encode({\n                status = \"success\",\n                message = \"AI evaluation system \" .. (State.ai_system.enabled and \"enabled\" or \"disabled\"),\n                ai_system_enabled = State.ai_system.enabled\n            })\n        })\n    end\n)\n\n-- Handler: Get AI Statistics\nHandlers.add(\n    \"Get-AI-Stats\",\n    Handlers.utils.hasMatchingTag(\"Action\", \"Get-AI-Stats\"),\n    function(msg)\n        local ai_stats = getAIStatistics()\n        \n        ao.send({\n            Target = msg.From,\n            Data = json.encode({\n                status = \"success\",\n                ai_statistics = ai_stats,\n                current_case = {\n                    case_id = State.active_tweet.case_id,\n                    case_title = State.active_tweet.title,\n                    ai_confidence = State.active_tweet.ai_confidence\n                }\n            })\n        })\n    end\n)\n\n-- ============================================================================\n-- POOL MANAGEMENT HANDLERS
 -- ============================================================================
 
 -- Handler: Get Pool Information
