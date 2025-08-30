@@ -2,6 +2,10 @@
 
 ## 実行順序
 
+### Phase 0: 前提 Process
+
+0. `phase-0-1-qf-calculator.md` - Quadratic Funding 計算 Process
+
 ### Phase 1: 基本システム
 
 1. `phase-1-1-basic-structure.md` - Process 基本構造とニュース管理
@@ -24,6 +28,7 @@
 
 ## 出力ファイル
 
+- QF Calculator: `process/src/qf-calculator.lua`
 - メイン Process: `process/src/truthfi-core.lua`
 - テストファイル: `process/src/tests/`
 - ドキュメント: `process/docs/`
@@ -36,10 +41,17 @@
 
 ## Phase 完了チェック
 
+### Phase 0 完了 ✅
+
+- [ ] QF Calculator Process 動作
+- [ ] クジラ対策機能
+- [ ] 他 Process 連携準備
+
 ### Phase 1 完了 ✅
 
 - [ ] 基本投票機能動作
 - [ ] USDA 受信・統計更新
+- [ ] QF Calculator Process 連携
 - [ ] 重複投票防止
 
 ### Phase 2 完了 ✅
