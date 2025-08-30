@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./node_modules/**)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(./build/**)",
+      "Read(./dist/**)",
+      "Read(./.git/**)",
+      "Read(./coverage/**)",
+      "Read(./tmp/**)",
+      "Read(./logs/**)",
+      "Read(./claude/ja/**)"
+    ]
+  }
+}
