@@ -4,6 +4,9 @@
 
 local json = require('json')
 
+-- RandAO Module Integration
+local randomModule = require('@randao/random')(json)
+
 -- ============================================================================
 -- GLOBAL STATE INITIALIZATION
 -- ============================================================================
@@ -12,7 +15,7 @@ State = State or {
     -- Process metadata
     name = "TruthFi Core",
     version = "1.0.0",
-    phase = "1-3-usda-pool-management",
+    phase = "2-1-randao-integration",
     admin = Owner or "",
     
     -- QF Calculator Process integration
@@ -36,6 +39,15 @@ State = State or {
     
     -- Deposit history tracking
     deposit_history = {},  -- Array of deposit records
+    
+    -- RandAO Lucky Number System
+    randao = {
+        enabled = true,
+        pending_requests = {},    -- { [callback_id] = { user: address, timestamp: number, request_type: string } }
+        completed_numbers = {},   -- { [user_address] = { lucky_number: number, callback_id: string, timestamp: number } }
+        request_count = 0,
+        last_request_time = 0
+    },
     
     -- Active tweet case being voted on
     active_tweet = {
@@ -255,6 +267,111 @@ local function validateDepositConsistency()
     end
     
     return true
+end
+
+-- ============================================================================
+-- RANDAO LUCKY NUMBER FUNCTIONS
+-- ============================================================================
+
+-- Generate Lucky Number for user after successful vote
+local function generateLuckyNumber(user_address, vote_choice)
+    if not State.randao.enabled then
+        print("RandAO: Lucky Number generation disabled")
+        return nil
+    end
+    
+    -- Generate unique callback ID
+    local callback_id = randomModule.generateUUID()
+    
+    -- Record pending request
+    State.randao.pending_requests[callback_id] = {
+        user = user_address,
+        timestamp = os.time(),
+        request_type = "lucky_number",
+        vote_choice = vote_choice,
+        case_id = State.active_tweet.case_id
+    }
+    
+    State.randao.request_count = State.randao.request_count + 1
+    State.randao.last_request_time = os.time()
+    
+    -- Request random number from RandAO
+    local success = pcall(function()
+        randomModule.requestRandom(callback_id)
+    end)
+    
+    if success then
+        print("RandAO: Lucky Number request sent - User: " .. user_address .. ", CallbackID: " .. callback_id)
+        return callback_id
+    else
+        -- Remove failed request
+        State.randao.pending_requests[callback_id] = nil
+        State.randao.request_count = State.randao.request_count - 1
+        print("RandAO: Failed to request Lucky Number for user: " .. user_address)
+        return nil
+    end
+end
+
+-- Process random number response from RandAO
+local function processLuckyNumberResponse(callback_id, entropy)
+    local request = State.randao.pending_requests[callback_id]
+    
+    if not request then
+        print("RandAO: Received response for unknown callback: " .. callback_id)
+        return false
+    end
+    
+    -- Convert entropy to Lucky Number (1-9999 range for SBT)
+    local lucky_number = (entropy % 9999) + 1
+    
+    -- Store completed Lucky Number
+    State.randao.completed_numbers[request.user] = {
+        lucky_number = lucky_number,
+        callback_id = callback_id,
+        timestamp = os.time(),
+        original_entropy = entropy,
+        vote_choice = request.vote_choice,
+        case_id = request.case_id
+    }
+    
+    -- Remove from pending requests
+    State.randao.pending_requests[callback_id] = nil
+    
+    print("RandAO: Lucky Number generated - User: " .. request.user .. ", Number: " .. lucky_number)
+    
+    return {
+        user = request.user,
+        lucky_number = lucky_number,
+        callback_id = callback_id,
+        entropy = entropy
+    }
+end
+
+-- Get Lucky Number for user
+local function getUserLuckyNumber(user_address)
+    return State.randao.completed_numbers[user_address]
+end
+
+-- Get RandAO statistics
+local function getRandAOStatistics()
+    local pending_count = 0
+    for _ in pairs(State.randao.pending_requests) do
+        pending_count = pending_count + 1
+    end
+    
+    local completed_count = 0
+    for _ in pairs(State.randao.completed_numbers) do
+        completed_count = completed_count + 1
+    end
+    
+    return {
+        enabled = State.randao.enabled,
+        total_requests = State.randao.request_count,
+        pending_requests = pending_count,
+        completed_numbers = completed_count,
+        last_request_time = State.randao.last_request_time,
+        success_rate = State.randao.request_count > 0 and (completed_count / State.randao.request_count * 100) or 0
+    }
 end
 
 -- ============================================================================
@@ -650,20 +767,32 @@ Handlers.add(
         -- Update pool balance
         local deposit_record = updatePoolBalance(quantity, sender, vote_choice, msg.Id)
         
+        -- Generate Lucky Number via RandAO
+        local callback_id = generateLuckyNumber(sender, vote_choice)
+        
         -- Send success response
+        -- Prepare success response with Lucky Number info
+        local response_data = {
+            status = "success",
+            message = "Vote recorded successfully!",
+            vote = {
+                choice = vote_choice,
+                amount = quantity,
+                case_id = State.active_tweet.case_id,
+                timestamp = os.time()
+            },
+            current_stats = State.voting_stats,
+            lucky_number = {
+                requested = callback_id ~= nil,
+                callback_id = callback_id,
+                status = callback_id and "pending" or "disabled",
+                note = callback_id and "Lucky Number generation in progress via RandAO" or "RandAO Lucky Number generation disabled"
+            }
+        }
+        
         ao.send({
             Target = sender,
-            Data = json.encode({
-                status = "success",
-                message = "Vote recorded successfully!",
-                vote = {
-                    choice = vote_choice,
-                    amount = quantity,
-                    case_id = State.active_tweet.case_id,
-                    timestamp = os.time()
-                },
-                current_stats = State.voting_stats
-            })
+            Data = json.encode(response_data)
         })
         
         print("TruthFi: Vote recorded - " .. sender .. " voted " .. vote_choice .. " with " .. quantity .. " armstrong")
@@ -912,6 +1041,207 @@ Handlers.add(
                 status = "success",
                 message = "Voting " .. (State.voting_enabled and "enabled" or "disabled"),
                 voting_enabled = State.voting_enabled
+            })
+        })
+    end
+)
+
+-- ============================================================================
+-- RANDAO HANDLERS
+-- ============================================================================
+
+-- Handler: RandomResponse (Process random number from RandAO)
+Handlers.add(
+    "RandomResponse",
+    Handlers.utils.hasMatchingTag("Action", "RandomResponse"),
+    function(msg)
+        local success, callback_id, entropy = pcall(function()
+            return randomModule.processRandomResponse(msg.From, json.decode(msg.Data))
+        end)
+        
+        if not success then
+            print("RandAO: Failed to process random response - " .. tostring(callback_id))
+            return
+        end
+        
+        -- Process the Lucky Number
+        local result = processLuckyNumberResponse(callback_id, entropy)
+        
+        if result then
+            -- Notify user about their Lucky Number
+            ao.send({
+                Target = result.user,
+                Data = json.encode({
+                    status = "success",
+                    action = "lucky_number_generated",
+                    lucky_number = {
+                        number = result.lucky_number,
+                        callback_id = result.callback_id,
+                        entropy = result.entropy,
+                        case_id = State.active_tweet.case_id
+                    },
+                    message = "Your Lucky Number has been generated: " .. result.lucky_number,
+                    next_steps = "Your SBT will be issued with this Lucky Number"
+                })
+            })
+            
+            print("RandAO: Lucky Number notification sent to " .. result.user)
+        end
+    end
+)
+
+-- Handler: Get Lucky Number Status
+Handlers.add(
+    "Get-Lucky-Number",
+    Handlers.utils.hasMatchingTag("Action", "Get-Lucky-Number"),
+    function(msg)
+        local user_address = msg.Tags["User"] or msg.From
+        local lucky_number = getUserLuckyNumber(user_address)
+        
+        if lucky_number then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    user_address = user_address,
+                    lucky_number = lucky_number,
+                    has_lucky_number = true
+                })
+            })
+        else
+            -- Check if there's a pending request
+            local pending_request = nil
+            for callback_id, request in pairs(State.randao.pending_requests) do
+                if request.user == user_address then
+                    pending_request = {
+                        callback_id = callback_id,
+                        timestamp = request.timestamp,
+                        request_type = request.request_type
+                    }
+                    break
+                end
+            end
+            
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    user_address = user_address,
+                    has_lucky_number = false,
+                    pending_request = pending_request,
+                    message = pending_request and "Lucky Number generation in progress" or "No Lucky Number found for this user"
+                })
+            })
+        end
+    end
+)
+
+-- Handler: Get RandAO Statistics
+Handlers.add(
+    "Get-RandAO-Stats",
+    Handlers.utils.hasMatchingTag("Action", "Get-RandAO-Stats"),
+    function(msg)
+        local randao_stats = getRandAOStatistics()
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                randao_statistics = randao_stats,
+                module_info = {
+                    payment_token = randomModule.PaymentToken or "N/A",
+                    random_cost = randomModule.RandomCost or "N/A",
+                    random_process = randomModule.RandomProcess or "N/A"
+                }
+            })
+        })
+    end
+)
+
+-- Handler: Toggle RandAO (Admin only)
+Handlers.add(
+    "Toggle-RandAO",
+    Handlers.utils.hasMatchingTag("Action", "Toggle-RandAO"),
+    function(msg)
+        if msg.From ~= State.admin then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Unauthorized: Admin access required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        State.randao.enabled = not State.randao.enabled
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "RandAO Lucky Number generation " .. (State.randao.enabled and "enabled" or "disabled"),
+                randao_enabled = State.randao.enabled
+            })
+        })
+    end
+)
+
+-- Handler: Manual Lucky Number Request (for testing)
+Handlers.add(
+    "Request-Lucky-Number",
+    Handlers.utils.hasMatchingTag("Action", "Request-Lucky-Number"),
+    function(msg)
+        -- Check if user has voted
+        if not State.user_votes[msg.From] then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "You must vote first to request a Lucky Number",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        -- Check if user already has a Lucky Number
+        if getUserLuckyNumber(msg.From) then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "You already have a Lucky Number",
+                    status = "error",
+                    existing_number = getUserLuckyNumber(msg.From)
+                })
+            })
+            return
+        end
+        
+        -- Check for pending request
+        for callback_id, request in pairs(State.randao.pending_requests) do
+            if request.user == msg.From then
+                ao.send({
+                    Target = msg.From,
+                    Data = json.encode({
+                        error = "Lucky Number request already pending",
+                        status = "error",
+                        callback_id = callback_id
+                    })
+                })
+                return
+            end
+        end
+        
+        local user_vote = State.user_votes[msg.From]
+        local callback_id = generateLuckyNumber(msg.From, user_vote.vote)
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "Lucky Number request submitted",
+                callback_id = callback_id,
+                note = "You will receive your Lucky Number shortly"
             })
         })
     end
