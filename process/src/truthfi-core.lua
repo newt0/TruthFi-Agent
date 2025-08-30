@@ -12,11 +12,18 @@ State = State or {
     -- Process metadata
     name = "TruthFi Core",
     version = "1.0.0",
-    phase = "1-1-basic-structure",
+    phase = "1-2-voting-system",
     admin = Owner or "",
     
     -- QF Calculator Process integration
     qf_calculator_process = "",
+    
+    -- USDA token configuration
+    usda_token_process = "",
+    required_deposit = "1000000000",  -- 1 USDA in armstrong units
+    
+    -- Voting configuration
+    voting_enabled = true,
     
     -- Active tweet case being voted on
     active_tweet = {
@@ -94,6 +101,64 @@ local function addStringNumbers(a, b)
 end
 
 -- ============================================================================
+-- VOTING VALIDATION FUNCTIONS
+-- ============================================================================
+
+-- Check if vote amount is exactly 1 USDA
+local function isValidVoteAmount(amount)
+    return safeToString(amount) == State.required_deposit
+end
+
+-- Check if vote choice is valid (true/fake)
+local function isValidVoteChoice(choice)
+    return choice == "true" or choice == "fake"
+end
+
+-- Check if user has already voted
+local function hasUserVoted(user_address)
+    return State.user_votes[user_address] ~= nil
+end
+
+-- Update voting statistics after a vote
+local function updateVotingStats(vote_choice, amount, is_new_voter)
+    if vote_choice == "true" then
+        State.voting_stats.true_votes = State.voting_stats.true_votes + 1
+        State.voting_stats.true_deposited = addStringNumbers(State.voting_stats.true_deposited, amount)
+        if is_new_voter then
+            State.voting_stats.true_voters = State.voting_stats.true_voters + 1
+        end
+    else  -- fake
+        State.voting_stats.fake_votes = State.voting_stats.fake_votes + 1
+        State.voting_stats.fake_deposited = addStringNumbers(State.voting_stats.fake_deposited, amount)
+        if is_new_voter then
+            State.voting_stats.fake_voters = State.voting_stats.fake_voters + 1
+        end
+    end
+    
+    State.voting_stats.total_deposits = addStringNumbers(State.voting_stats.total_deposits, amount)
+    
+    if is_new_voter then
+        State.voting_stats.unique_voters = State.voting_stats.unique_voters + 1
+    end
+end
+
+-- Record user vote
+local function recordUserVote(user_address, vote_choice, amount)
+    local is_new_voter = not hasUserVoted(user_address)
+    
+    State.user_votes[user_address] = {
+        vote = vote_choice,
+        amount = safeToString(amount),
+        timestamp = os.time(),
+        case_id = State.active_tweet.case_id
+    }
+    
+    updateVotingStats(vote_choice, amount, is_new_voter)
+    
+    return is_new_voter
+end
+
+-- ============================================================================
 -- INITIALIZATION FUNCTIONS
 -- ============================================================================
 
@@ -132,7 +197,7 @@ function loadSampleTweet()
         title = "Celebrity A and B Marriage Announcement Tweet Fact-Check Vote",
         main_tweet = {
             tweet_id = "1735123456789012345",
-            content = "<‰Finally got married! Thank you everyone! #MarriageAnnouncement #Happy",
+            content = "<ï¿½Finally got married! Thank you everyone! #MarriageAnnouncement #Happy",
             username = "celebrity_a_official",
             posted_at = "2024-12-15T10:30:00Z",
             likes = 15420,
@@ -391,6 +456,360 @@ Handlers.add(
                 message = "Sample tweet data loaded successfully",
                 case_id = State.active_tweet.case_id,
                 title = State.active_tweet.title
+            })
+        })
+    end
+)
+
+-- ============================================================================
+-- VOTING SYSTEM HANDLERS
+-- ============================================================================
+
+-- Handler: Credit-Notice (USDA deposits for voting)
+Handlers.add(
+    "Credit-Notice",
+    Handlers.utils.hasMatchingTag("Action", "Credit-Notice"),
+    function(msg)
+        -- Verify this is a USDA deposit
+        if msg.From ~= State.usda_token_process and State.usda_token_process ~= "" then
+            -- Ignore credits from other tokens
+            return
+        end
+        
+        local quantity = msg.Tags.Quantity or "0"
+        local sender = msg.Tags.Sender or ""
+        local vote_choice = msg.Tags["Vote-Choice"] or ""
+        
+        -- Validate deposit amount (must be exactly 1 USDA)
+        if not isValidVoteAmount(quantity) then
+            ao.send({
+                Target = sender,
+                Data = json.encode({
+                    error = "Invalid vote amount. Must deposit exactly 1 USDA (" .. State.required_deposit .. " armstrong)",
+                    status = "error",
+                    required_amount = State.required_deposit,
+                    received_amount = quantity
+                })
+            })
+            return
+        end
+        
+        -- Validate vote choice
+        if not isValidVoteChoice(vote_choice) then
+            ao.send({
+                Target = sender,
+                Data = json.encode({
+                    error = "Invalid vote choice. Must be 'true' or 'fake'",
+                    status = "error",
+                    valid_choices = {"true", "fake"},
+                    received_choice = vote_choice
+                })
+            })
+            return
+        end
+        
+        -- Check if voting is enabled
+        if not State.voting_enabled then
+            ao.send({
+                Target = sender,
+                Data = json.encode({
+                    error = "Voting is currently disabled",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        -- Check if user has already voted
+        if hasUserVoted(sender) then
+            ao.send({
+                Target = sender,
+                Data = json.encode({
+                    error = "You have already voted on this case. Only one vote per user is allowed.",
+                    status = "error",
+                    existing_vote = State.user_votes[sender]
+                })
+            })
+            return
+        end
+        
+        -- Check if there's an active tweet case
+        if State.active_tweet.case_id == "" then
+            ao.send({
+                Target = sender,
+                Data = json.encode({
+                    error = "No active tweet case available for voting",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        -- Record the vote
+        local is_new_voter = recordUserVote(sender, vote_choice, quantity)
+        
+        -- Send success response
+        ao.send({
+            Target = sender,
+            Data = json.encode({
+                status = "success",
+                message = "Vote recorded successfully!",
+                vote = {
+                    choice = vote_choice,
+                    amount = quantity,
+                    case_id = State.active_tweet.case_id,
+                    timestamp = os.time()
+                },
+                current_stats = State.voting_stats
+            })
+        })
+        
+        print("TruthFi: Vote recorded - " .. sender .. " voted " .. vote_choice .. " with " .. quantity .. " armstrong")
+    end
+)
+
+-- Handler: Submit Vote (Alternative method without automatic USDA transfer)
+Handlers.add(
+    "Submit-Vote",
+    Handlers.utils.hasMatchingTag("Action", "Submit-Vote"),
+    function(msg)
+        local vote_choice = msg.Tags["Vote-Choice"] or ""
+        local amount = msg.Tags["Amount"] or State.required_deposit
+        
+        -- Validate vote choice
+        if not isValidVoteChoice(vote_choice) then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Invalid vote choice. Must be 'true' or 'fake'",
+                    status = "error",
+                    valid_choices = {"true", "fake"}
+                })
+            })
+            return
+        end
+        
+        -- Check voting enabled
+        if not State.voting_enabled then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Voting is currently disabled",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        -- Check duplicate vote
+        if hasUserVoted(msg.From) then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "You have already voted on this case",
+                    status = "error",
+                    existing_vote = State.user_votes[msg.From]
+                })
+            })
+            return
+        end
+        
+        -- Check active case
+        if State.active_tweet.case_id == "" then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "No active tweet case available",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        -- For this implementation, we'll require USDA transfer via Credit-Notice
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "pending",
+                message = "Please send exactly 1 USDA to this process with Vote-Choice tag to complete your vote",
+                instructions = {
+                    required_amount = State.required_deposit,
+                    required_tag = "Vote-Choice: " .. vote_choice,
+                    usda_process = State.usda_token_process or "TBD"
+                }
+            })
+        })
+    end
+)
+
+-- ============================================================================
+-- VOTE RESULT RETRIEVAL HANDLERS
+-- ============================================================================
+
+-- Handler: Get User Vote Status
+Handlers.add(
+    "Get-User-Vote",
+    Handlers.utils.hasMatchingTag("Action", "Get-User-Vote"),
+    function(msg)
+        local user_address = msg.Tags["User"] or msg.From
+        local user_vote = State.user_votes[user_address]
+        
+        if not user_vote then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    has_voted = false,
+                    message = "User has not voted on the current case",
+                    user_address = user_address,
+                    active_case_id = State.active_tweet.case_id
+                })
+            })
+            return
+        end
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                has_voted = true,
+                vote = user_vote,
+                user_address = user_address
+            })
+        })
+    end
+)
+
+-- Handler: Get Overall Voting Results
+Handlers.add(
+    "Get-Voting-Results",
+    Handlers.utils.hasMatchingTag("Action", "Get-Voting-Results"),
+    function(msg)
+        local include_qf = msg.Tags["Include-QF"] == "true"
+        local result = {
+            status = "success",
+            case_id = State.active_tweet.case_id,
+            case_title = State.active_tweet.title,
+            voting_stats = State.voting_stats,
+            voting_enabled = State.voting_enabled,
+            required_deposit = State.required_deposit
+        }
+        
+        -- Calculate basic percentages
+        local total_votes = State.voting_stats.true_votes + State.voting_stats.fake_votes
+        if total_votes > 0 then
+            result.percentages = {
+                true_percentage = math.floor((State.voting_stats.true_votes / total_votes) * 1000 + 0.5) / 10,
+                fake_percentage = math.floor((State.voting_stats.fake_votes / total_votes) * 1000 + 0.5) / 10
+            }
+        else
+            result.percentages = {
+                true_percentage = 0,
+                fake_percentage = 0
+            }
+        end
+        
+        -- Include QF calculation if requested and QF Calculator is available
+        if include_qf and State.qf_calculator_process ~= "" then
+            -- Prepare vote data for QF calculation
+            local qf_vote_data = {
+                true_votes = {
+                    amounts = {},
+                    voters = State.voting_stats.true_voters
+                },
+                fake_votes = {
+                    amounts = {},
+                    voters = State.voting_stats.fake_voters
+                }
+            }
+            
+            -- Collect vote amounts (simplified - each vote is 1 USDA)
+            for i = 1, State.voting_stats.true_voters do
+                table.insert(qf_vote_data.true_votes.amounts, State.required_deposit)
+            end
+            
+            for i = 1, State.voting_stats.fake_voters do
+                table.insert(qf_vote_data.fake_votes.amounts, State.required_deposit)
+            end
+            
+            result.qf_data = qf_vote_data
+            result.qf_calculator_process = State.qf_calculator_process
+            result.note = "Use qf_data to call QF Calculator Process for quadratic funding percentages"
+        end
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(result)
+        })
+    end
+)
+
+-- Handler: Set USDA Token Process (Admin only)
+Handlers.add(
+    "Set-USDA-Process",
+    Handlers.utils.hasMatchingTag("Action", "Set-USDA-Process"),
+    function(msg)
+        if msg.From ~= State.admin then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Unauthorized: Admin access required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        local process_id = msg.Tags["Process-ID"] or ""
+        
+        if process_id == "" then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Process-ID tag is required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        State.usda_token_process = process_id
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "USDA Token Process ID updated successfully",
+                process_id = process_id
+            })
+        })
+    end
+)
+
+-- Handler: Toggle Voting (Admin only)
+Handlers.add(
+    "Toggle-Voting",
+    Handlers.utils.hasMatchingTag("Action", "Toggle-Voting"),
+    function(msg)
+        if msg.From ~= State.admin then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Unauthorized: Admin access required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        State.voting_enabled = not State.voting_enabled
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "Voting " .. (State.voting_enabled and "enabled" or "disabled"),
+                voting_enabled = State.voting_enabled
             })
         })
     end
