@@ -1,72 +1,72 @@
-# TruthFi Process Implementation Guide
+# TruthFi Process 実装ガイド
 
-## Execution Order
+## 実行順序
 
-### Phase 1: Basic System
+### Phase 1: 基本システム
 
-1. `phase-1-1-basic-structure.md` - Process basic structure and news management
-2. `phase-1-2-voting-system.md` - USDA voting system implementation
-3. `phase-1-3-usda-pool-management.md` - USDA pool management functionality
+1. `phase-1-1-basic-structure.md` - Process 基本構造とニュース管理
+2. `phase-1-2-voting-system.md` - USDA 投票システム実装
+3. `phase-1-3-usda-pool-management.md` - USDA プール管理機能
 
 ### Phase 2: SBT・RandAO
 
-4. `phase-2-1-randao-integration.md` - RandAO integration and Lucky Number
-5. `phase-2-2-sbt-issuance-system.md` - SBT issuance system
+4. `phase-2-1-randao-integration.md` - RandAO 統合と Lucky Number
+5. `phase-2-2-sbt-issuance-system.md` - SBT 発行システム
 
-### Phase 3: AI Integration
+### Phase 3: AI 統合
 
-6. `phase-3-1-apus-ai-integration.md` - Apus AI judgment functionality
+6. `phase-3-1-apus-ai-integration.md` - Apus AI 判定機能
 
-### Phase 4: Integration・Testing
+### Phase 4: 統合・テスト
 
-7. `phase-4-1-system-integration.md` - Full system integration
-8. `phase-4-2-final-testing.md` - Final testing
+7. `phase-4-1-system-integration.md` - 全機能統合
+8. `phase-4-2-final-testing.md` - 最終テスト
 
-## Output Files
+## 出力ファイル
 
-- Main Process: `process/src/truthfi-core.lua`
-- Test files: `process/src/tests/`
-- Documentation: `process/docs/`
+- メイン Process: `process/src/truthfi-core.lua`
+- テストファイル: `process/src/tests/`
+- ドキュメント: `process/docs/`
 
-## Prerequisites
+## 前提条件
 
-- Review reference documents in `/docs/ao-ecosystem/`
-- Complete AOS environment setup
-- Prepare test USDA・AO tokens
+- `/docs/ao-ecosystem/` の参照ドキュメント確認
+- AOS 環境セットアップ完了
+- テスト用 USDA・AO トークン準備
 
-## Phase Completion Checklist
+## Phase 完了チェック
 
-### Phase 1 Complete ✅
+### Phase 1 完了 ✅
 
-- [ ] Basic voting functionality operational
-- [ ] USDA reception and statistics update
-- [ ] Duplicate vote prevention
+- [ ] 基本投票機能動作
+- [ ] USDA 受信・統計更新
+- [ ] 重複投票防止
 
-### Phase 2 Complete ✅
+### Phase 2 完了 ✅
 
-- [ ] RandAO Lucky Number retrieval
-- [ ] SBT issuance functionality
-- [ ] Metadata configuration
+- [ ] RandAO Lucky Number 取得
+- [ ] SBT 発行機能
+- [ ] メタデータ設定
 
-### Phase 3 Complete ✅
+### Phase 3 完了 ✅
 
-- [ ] Apus AI judgment result retrieval
-- [ ] Confidence percentage display
+- [ ] Apus AI 判定結果取得
+- [ ] 信頼度パーセンテージ表示
 
-### Phase 4 Complete ✅
+### Phase 4 完了 ✅
 
-- [ ] Full system integration
-- [ ] Error handling
-- [ ] Frontend integration preparation
+- [ ] 全機能統合
+- [ ] エラーハンドリング
+- [ ] フロントエンド連携準備
 
-## Error Response
+## エラー対応
 
-- **Mid-phase errors**: Re-execute the relevant phase
-- **Integration errors**: Use `debug-troubleshooting.md`
-- **Performance issues**: Reference `performance-optimization.md`
+- **Phase 途中でエラー**: 該当 Phase を再実行
+- **統合時エラー**: `debug-troubleshooting.md`使用
+- **パフォーマンス問題**: `performance-optimization.md`参照
 
-## Support Prompts
+## 補助プロンプト
 
-- `debug-troubleshooting.md` - Debug assistance
-- `performance-optimization.md` - Optimization
-- `deployment-preparation.md` - Deployment preparation
+- `debug-troubleshooting.md` - デバッグ支援
+- `performance-optimization.md` - 最適化
+- `deployment-preparation.md` - デプロイ準備
