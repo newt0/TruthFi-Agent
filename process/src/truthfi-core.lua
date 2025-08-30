@@ -15,7 +15,7 @@ State = State or {
     -- Process metadata
     name = "TruthFi Core",
     version = "1.0.0",
-    phase = "2-1-randao-integration",
+    phase = "2-2-sbt-issuance-system",
     admin = Owner or "",
     
     -- QF Calculator Process integration
@@ -84,8 +84,18 @@ State = State or {
     -- User vote tracking
     user_votes = {},  -- Format: { [user_address] = { vote: "true"/"fake", amount: "1000000000", timestamp: number } }
     
-    -- SBT token tracking (for Phase 2)
-    sbt_tokens = {},  -- Format: { [user_address] = { token_id: "", lucky_number: number, metadata: {} } }
+    -- SBT token tracking and management
+    sbt_tokens = {},  -- Format: { [user_address] = { token_id: string, process_id: string, metadata: {}, status: string, issue_timestamp: number } },
+    
+    -- SBT System Configuration
+    sbt_config = {
+        enabled = true,
+        asset_src = "y9VgAlhHThl-ZiXvzkDzwC5DEjfPegD6VAotpP3WRbs",  -- AO Atomic Asset source
+        collection_id = "",  -- TruthFi SBT Collection ID (to be set)
+        denomination = "1",
+        ticker = "TRUTHFI",
+        auto_issue = true  -- Automatically issue SBT when Lucky Number is ready
+    },
     
     -- AI evaluation prompt template (for Phase 3)
     ai_prompt_template = ""
@@ -371,6 +381,174 @@ local function getRandAOStatistics()
         completed_numbers = completed_count,
         last_request_time = State.randao.last_request_time,
         success_rate = State.randao.request_count > 0 and (completed_count / State.randao.request_count * 100) or 0
+    }
+end
+
+-- ============================================================================
+-- SBT ISSUANCE FUNCTIONS
+-- ============================================================================
+
+-- Create SBT metadata based on user vote and Lucky Number
+local function createSBTMetadata(user_address, vote_data, lucky_number_data)
+    local user_vote = State.user_votes[user_address]
+    if not user_vote then
+        return nil
+    end
+    
+    local metadata = {
+        vote_choice = user_vote.vote,
+        vote_timestamp = user_vote.timestamp,
+        news_id = user_vote.case_id or State.active_tweet.case_id,
+        news_title = State.active_tweet.title,
+        lucky_number = lucky_number_data.lucky_number,
+        deposit_amount = user_vote.amount,
+        entropy_source = lucky_number_data.original_entropy,
+        randao_callback = lucky_number_data.callback_id,
+        issue_timestamp = os.time(),
+        issuer_process = ao.id,
+        platform = "TruthFi",
+        version = State.version
+    }
+    
+    return metadata
+end
+
+-- Issue SBT as Atomic Asset
+local function issueSBT(user_address)
+    if not State.sbt_config.enabled then
+        print("SBT: SBT issuance is disabled")
+        return false, "SBT issuance disabled"
+    end
+    
+    -- Check if user already has SBT
+    if State.sbt_tokens[user_address] then
+        print("SBT: User already has SBT - " .. user_address)
+        return false, "User already has SBT for this case"
+    end
+    
+    -- Check if user has voted
+    local user_vote = State.user_votes[user_address]
+    if not user_vote then
+        print("SBT: User has not voted - " .. user_address)
+        return false, "User must vote before receiving SBT"
+    end
+    
+    -- Check if Lucky Number is available
+    local lucky_number = getUserLuckyNumber(user_address)
+    if not lucky_number then
+        print("SBT: Lucky Number not ready for user - " .. user_address)
+        return false, "Lucky Number not yet generated"
+    end
+    
+    -- Create metadata
+    local metadata = createSBTMetadata(user_address, user_vote, lucky_number)
+    if not metadata then
+        print("SBT: Failed to create metadata for user - " .. user_address)
+        return false, "Failed to create SBT metadata"
+    end
+    
+    -- Generate SBT title and description
+    local sbt_title = "TruthFi Vote Record #" .. lucky_number.lucky_number
+    local sbt_description = "Soul Bound Token proving participation in TruthFi vote for case: " .. metadata.news_id .. 
+                           ". Voted: " .. metadata.vote_choice .. ". Lucky Number: " .. metadata.lucky_number
+    
+    -- For now, we'll simulate the Atomic Asset creation process
+    -- In a real implementation, this would involve spawning a new AO process
+    local sbt_process_id = "sbt-" .. user_address .. "-" .. metadata.news_id .. "-" .. os.time()
+    
+    -- Store SBT information
+    State.sbt_tokens[user_address] = {
+        token_id = sbt_process_id,
+        process_id = sbt_process_id,
+        title = sbt_title,
+        description = sbt_description,
+        metadata = metadata,
+        status = "issued",
+        issue_timestamp = os.time(),
+        owner = user_address,
+        transferable = false,  -- Soul Bound = non-transferable
+        collection_id = State.sbt_config.collection_id
+    }
+    
+    print("SBT: Issued SBT for user " .. user_address .. " - Token ID: " .. sbt_process_id)
+    
+    return true, sbt_process_id
+end
+
+-- Check if user is eligible for SBT issuance
+local function checkSBTEligibility(user_address)
+    local eligibility = {
+        eligible = true,
+        reasons = {},
+        requirements = {}
+    }
+    
+    -- Check if SBT system is enabled
+    if not State.sbt_config.enabled then
+        eligibility.eligible = false
+        table.insert(eligibility.reasons, "SBT issuance system is disabled")
+    end
+    
+    -- Check if user already has SBT
+    if State.sbt_tokens[user_address] then
+        eligibility.eligible = false
+        table.insert(eligibility.reasons, "User already has SBT for this case")
+    else
+        table.insert(eligibility.requirements, "User must not have existing SBT")
+    end
+    
+    -- Check if user has voted
+    if not State.user_votes[user_address] then
+        eligibility.eligible = false
+        table.insert(eligibility.reasons, "User must vote first")
+    else
+        table.insert(eligibility.requirements, "User must have voted")
+    end
+    
+    -- Check if Lucky Number is ready
+    local lucky_number = getUserLuckyNumber(user_address)
+    if not lucky_number then
+        eligibility.eligible = false
+        table.insert(eligibility.reasons, "Lucky Number not yet generated")
+    else
+        table.insert(eligibility.requirements, "Lucky Number must be generated")
+    end
+    
+    return eligibility
+end
+
+-- Get SBT statistics
+local function getSBTStatistics()
+    local issued_count = 0
+    local pending_count = 0
+    
+    for user_address, sbt_data in pairs(State.sbt_tokens) do
+        if sbt_data.status == "issued" then
+            issued_count = issued_count + 1
+        elseif sbt_data.status == "pending" then
+            pending_count = pending_count + 1
+        end
+    end
+    
+    -- Count users eligible for SBT
+    local eligible_count = 0
+    for user_address, _ in pairs(State.user_votes) do
+        if not State.sbt_tokens[user_address] then
+            local eligibility = checkSBTEligibility(user_address)
+            if eligibility.eligible then
+                eligible_count = eligible_count + 1
+            end
+        end
+    end
+    
+    return {
+        enabled = State.sbt_config.enabled,
+        auto_issue = State.sbt_config.auto_issue,
+        total_issued = issued_count,
+        total_pending = pending_count,
+        eligible_users = eligible_count,
+        collection_id = State.sbt_config.collection_id,
+        asset_source = State.sbt_config.asset_src
     }
 end
 
@@ -1086,6 +1264,32 @@ Handlers.add(
             })
             
             print("RandAO: Lucky Number notification sent to " .. result.user)
+            
+            -- Auto-issue SBT if enabled and user is eligible
+            if State.sbt_config.auto_issue then
+                local sbt_success, sbt_result = issueSBT(result.user)
+                if sbt_success then
+                    -- Notify user about SBT issuance
+                    ao.send({
+                        Target = result.user,
+                        Data = json.encode({
+                            status = "success",
+                            action = "sbt_issued",
+                            sbt = {
+                                token_id = sbt_result,
+                                title = State.sbt_tokens[result.user].title,
+                                description = State.sbt_tokens[result.user].description,
+                                lucky_number = result.lucky_number
+                            },
+                            message = "Your TruthFi SBT has been issued!",
+                            case_id = State.active_tweet.case_id
+                        })
+                    })
+                    print("SBT: Auto-issued SBT for user " .. result.user)
+                else
+                    print("SBT: Auto-issuance failed for user " .. result.user .. " - " .. sbt_result)
+                end
+            end
         end
     end
 )
@@ -1242,6 +1446,313 @@ Handlers.add(
                 message = "Lucky Number request submitted",
                 callback_id = callback_id,
                 note = "You will receive your Lucky Number shortly"
+            })
+        })
+    end
+)
+
+-- ============================================================================
+-- SBT ISSUANCE HANDLERS
+-- ============================================================================
+
+-- Handler: Issue SBT (Manual or retry failed auto-issuance)
+Handlers.add(
+    "Issue-SBT",
+    Handlers.utils.hasMatchingTag("Action", "Issue-SBT"),
+    function(msg)
+        local user_address = msg.Tags["User"] or msg.From
+        
+        -- Check eligibility
+        local eligibility = checkSBTEligibility(user_address)
+        if not eligibility.eligible then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "User not eligible for SBT issuance",
+                    status = "error",
+                    reasons = eligibility.reasons,
+                    requirements = eligibility.requirements
+                })
+            })
+            return
+        end
+        
+        -- Issue SBT
+        local success, result = issueSBT(user_address)
+        
+        if success then
+            local sbt_data = State.sbt_tokens[user_address]
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    message = "SBT issued successfully",
+                    sbt = {
+                        token_id = result,
+                        process_id = sbt_data.process_id,
+                        title = sbt_data.title,
+                        description = sbt_data.description,
+                        metadata = sbt_data.metadata,
+                        issue_timestamp = sbt_data.issue_timestamp
+                    }
+                })
+            })
+            
+            -- If issuing for someone else, also notify the recipient
+            if user_address ~= msg.From then
+                ao.send({
+                    Target = user_address,
+                    Data = json.encode({
+                        status = "success",
+                        action = "sbt_issued",
+                        message = "Your TruthFi SBT has been issued",
+                        sbt = {
+                            token_id = result,
+                            title = sbt_data.title,
+                            description = sbt_data.description
+                        }
+                    })
+                })
+            end
+        else
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "SBT issuance failed: " .. result,
+                    status = "error"
+                })
+            })
+        end
+    end
+)
+
+-- Handler: Get User SBTs
+Handlers.add(
+    "Get-User-SBTs",
+    Handlers.utils.hasMatchingTag("Action", "Get-User-SBTs"),
+    function(msg)
+        local user_address = msg.Tags["User"] or msg.From
+        local sbt_data = State.sbt_tokens[user_address]
+        
+        if sbt_data then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    user_address = user_address,
+                    has_sbt = true,
+                    sbt = {
+                        token_id = sbt_data.token_id,
+                        process_id = sbt_data.process_id,
+                        title = sbt_data.title,
+                        description = sbt_data.description,
+                        status = sbt_data.status,
+                        issue_timestamp = sbt_data.issue_timestamp,
+                        transferable = sbt_data.transferable,
+                        collection_id = sbt_data.collection_id
+                    }
+                })
+            })
+        else
+            -- Check eligibility for future issuance
+            local eligibility = checkSBTEligibility(user_address)
+            
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    user_address = user_address,
+                    has_sbt = false,
+                    eligibility = eligibility,
+                    message = eligibility.eligible and "User is eligible for SBT issuance" or "User not currently eligible for SBT"
+                })
+            })
+        end
+    end
+)
+
+-- Handler: Get SBT Details
+Handlers.add(
+    "Get-SBT-Info",
+    Handlers.utils.hasMatchingTag("Action", "Get-SBT-Info"),
+    function(msg)
+        local user_address = msg.Tags["User"] or msg.From
+        local sbt_data = State.sbt_tokens[user_address]
+        
+        if not sbt_data then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "No SBT found for user",
+                    status = "error",
+                    user_address = user_address
+                })
+            })
+            return
+        end
+        
+        -- Include full metadata and related information
+        local detailed_info = {
+            status = "success",
+            sbt = sbt_data,
+            related_data = {
+                user_vote = State.user_votes[user_address],
+                lucky_number = getUserLuckyNumber(user_address),
+                case_info = {
+                    case_id = State.active_tweet.case_id,
+                    title = State.active_tweet.title
+                }
+            },
+            system_info = {
+                sbt_config = State.sbt_config,
+                issue_process = ao.id
+            }
+        }
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(detailed_info)
+        })
+    end
+)
+
+-- Handler: Get SBT Statistics
+Handlers.add(
+    "Get-SBT-Stats",
+    Handlers.utils.hasMatchingTag("Action", "Get-SBT-Stats"),
+    function(msg)
+        local sbt_stats = getSBTStatistics()
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                sbt_statistics = sbt_stats,
+                case_info = {
+                    active_case_id = State.active_tweet.case_id,
+                    case_title = State.active_tweet.title
+                }
+            })
+        })
+    end
+)
+
+-- Handler: Configure SBT System (Admin only)
+Handlers.add(
+    "Configure-SBT",
+    Handlers.utils.hasMatchingTag("Action", "Configure-SBT"),
+    function(msg)
+        if msg.From ~= State.admin then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Unauthorized: Admin access required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        local config_updates = {}
+        
+        -- Update configuration based on tags
+        if msg.Tags["SBT-Enabled"] then
+            State.sbt_config.enabled = msg.Tags["SBT-Enabled"] == "true"
+            config_updates.enabled = State.sbt_config.enabled
+        end
+        
+        if msg.Tags["Auto-Issue"] then
+            State.sbt_config.auto_issue = msg.Tags["Auto-Issue"] == "true"
+            config_updates.auto_issue = State.sbt_config.auto_issue
+        end
+        
+        if msg.Tags["Collection-ID"] then
+            State.sbt_config.collection_id = msg.Tags["Collection-ID"]
+            config_updates.collection_id = State.sbt_config.collection_id
+        end
+        
+        if msg.Tags["Asset-Source"] then
+            State.sbt_config.asset_src = msg.Tags["Asset-Source"]
+            config_updates.asset_src = State.sbt_config.asset_src
+        end
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "SBT configuration updated",
+                updates = config_updates,
+                current_config = State.sbt_config
+            })
+        })
+    end
+)
+
+-- Handler: Batch Issue SBTs (Admin only)
+Handlers.add(
+    "Batch-Issue-SBT",
+    Handlers.utils.hasMatchingTag("Action", "Batch-Issue-SBT"),
+    function(msg)
+        if msg.From ~= State.admin then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Unauthorized: Admin access required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        local results = {
+            successful = {},
+            failed = {},
+            total_processed = 0
+        }
+        
+        -- Issue SBTs for all eligible users
+        for user_address, _ in pairs(State.user_votes) do
+            if not State.sbt_tokens[user_address] then
+                local eligibility = checkSBTEligibility(user_address)
+                if eligibility.eligible then
+                    local success, result = issueSBT(user_address)
+                    results.total_processed = results.total_processed + 1
+                    
+                    if success then
+                        table.insert(results.successful, {
+                            user = user_address,
+                            token_id = result
+                        })
+                        
+                        -- Notify user
+                        ao.send({
+                            Target = user_address,
+                            Data = json.encode({
+                                status = "success",
+                                action = "sbt_issued",
+                                message = "Your TruthFi SBT has been issued",
+                                sbt = {
+                                    token_id = result,
+                                    title = State.sbt_tokens[user_address].title
+                                }
+                            })
+                        })
+                    else
+                        table.insert(results.failed, {
+                            user = user_address,
+                            error = result
+                        })
+                    end
+                end
+            end
+        end
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "Batch SBT issuance completed",
+                results = results
             })
         })
     end
