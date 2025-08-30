@@ -1,0 +1,33 @@
+{
+  "name": "truthfi-mvp",
+  "version": "1.0.0",
+  "description": "TruthFi MVP - Fake News Voting Platform on AO",
+  "main": "index.js",
+  "scripts": {
+    "setup": "node scripts/setup-aos.js",
+    "test": "node scripts/test-process.js",
+    "deploy": "node scripts/deploy.js",
+    "dev": "aos --process-name truthfi-core"
+  },
+  "keywords": [
+    "AO",
+    "truthfi",
+    "fake-news",
+    "voting",
+    "defi"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "@permaweb/aoconnect": "^0.0.56",
+    "@permaweb/ao-loader": "^0.0.35",
+    "aos": "latest",
+    "dotenv": "^16.3.1",
+    "fs-extra": "^11.1.1",
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.12"
+  },
+  "dependencies": {
+    "arweave": "^1.14.4"
+  }
+}
