@@ -12,7 +12,7 @@ State = State or {
     -- Process metadata
     name = "TruthFi Core",
     version = "1.0.0",
-    phase = "1-2-voting-system",
+    phase = "1-3-usda-pool-management",
     admin = Owner or "",
     
     -- QF Calculator Process integration
@@ -24,6 +24,18 @@ State = State or {
     
     -- Voting configuration
     voting_enabled = true,
+    
+    -- USDA Pool Management
+    pool = {
+        total_balance = "0",           -- Total USDA held in process
+        true_pool = "0",               -- USDA from true votes
+        fake_pool = "0",               -- USDA from fake votes
+        deposit_count = 0,              -- Number of deposits received
+        last_deposit_time = 0           -- Timestamp of last deposit
+    },
+    
+    -- Deposit history tracking
+    deposit_history = {},  -- Array of deposit records
     
     -- Active tweet case being voted on
     active_tweet = {
@@ -156,6 +168,93 @@ local function recordUserVote(user_address, vote_choice, amount)
     updateVotingStats(vote_choice, amount, is_new_voter)
     
     return is_new_voter
+end
+
+-- ============================================================================
+-- USDA POOL MANAGEMENT FUNCTIONS
+-- ============================================================================
+
+-- Update pool balance and history when USDA is received
+local function updatePoolBalance(amount, sender, vote_choice, transaction_id)
+    local deposit_amount = safeToString(amount)
+    
+    -- Update total balance
+    State.pool.total_balance = addStringNumbers(State.pool.total_balance, deposit_amount)
+    
+    -- Update vote-specific pools
+    if vote_choice == "true" then
+        State.pool.true_pool = addStringNumbers(State.pool.true_pool, deposit_amount)
+    else  -- fake
+        State.pool.fake_pool = addStringNumbers(State.pool.fake_pool, deposit_amount)
+    end
+    
+    -- Update deposit metadata
+    State.pool.deposit_count = State.pool.deposit_count + 1
+    State.pool.last_deposit_time = os.time()
+    
+    -- Record deposit in history
+    local deposit_record = {
+        id = State.pool.deposit_count,
+        sender = sender,
+        amount = deposit_amount,
+        vote_choice = vote_choice,
+        timestamp = os.time(),
+        case_id = State.active_tweet.case_id,
+        transaction_id = transaction_id or ""
+    }
+    
+    table.insert(State.deposit_history, deposit_record)
+    
+    -- Keep only last 1000 deposits to prevent memory issues
+    if #State.deposit_history > 1000 then
+        table.remove(State.deposit_history, 1)
+    end
+    
+    print("TruthFi Pool: Updated balance - Total: " .. State.pool.total_balance .. ", True: " .. State.pool.true_pool .. ", Fake: " .. State.pool.fake_pool)
+    
+    return deposit_record
+end
+
+-- Get pool statistics
+local function getPoolStatistics()
+    local total_balance_num = safeToNumber(State.pool.total_balance)
+    local true_pool_num = safeToNumber(State.pool.true_pool)
+    local fake_pool_num = safeToNumber(State.pool.fake_pool)
+    
+    local pool_stats = {
+        balances = {
+            total = State.pool.total_balance,
+            true_pool = State.pool.true_pool,
+            fake_pool = State.pool.fake_pool
+        },
+        metadata = {
+            deposit_count = State.pool.deposit_count,
+            last_deposit_time = State.pool.last_deposit_time,
+            average_deposit = State.pool.deposit_count > 0 and safeToString(total_balance_num / State.pool.deposit_count) or "0"
+        },
+        percentages = {
+            true_percentage = total_balance_num > 0 and (true_pool_num / total_balance_num * 100) or 0,
+            fake_percentage = total_balance_num > 0 and (fake_pool_num / total_balance_num * 100) or 0
+        },
+        voting_consistency = {
+            votes_match_deposits = State.voting_stats.total_deposits == State.pool.total_balance
+        }
+    }
+    
+    return pool_stats
+end
+
+-- Validate deposit consistency with voting
+local function validateDepositConsistency()
+    local voting_total = State.voting_stats.total_deposits
+    local pool_total = State.pool.total_balance
+    
+    if voting_total ~= pool_total then
+        print("WARNING: Deposit inconsistency detected - Voting: " .. voting_total .. ", Pool: " .. pool_total)
+        return false
+    end
+    
+    return true
 end
 
 -- ============================================================================
@@ -548,6 +647,9 @@ Handlers.add(
         -- Record the vote
         local is_new_voter = recordUserVote(sender, vote_choice, quantity)
         
+        -- Update pool balance
+        local deposit_record = updatePoolBalance(quantity, sender, vote_choice, msg.Id)
+        
         -- Send success response
         ao.send({
             Target = sender,
@@ -810,6 +912,230 @@ Handlers.add(
                 status = "success",
                 message = "Voting " .. (State.voting_enabled and "enabled" or "disabled"),
                 voting_enabled = State.voting_enabled
+            })
+        })
+    end
+)
+
+-- ============================================================================
+-- POOL MANAGEMENT HANDLERS
+-- ============================================================================
+
+-- Handler: Get Pool Information
+Handlers.add(
+    "Get-Pool-Info",
+    Handlers.utils.hasMatchingTag("Action", "Get-Pool-Info"),
+    function(msg)
+        local pool_stats = getPoolStatistics()
+        local consistency_check = validateDepositConsistency()
+        
+        local pool_info = {
+            status = "success",
+            pool_statistics = pool_stats,
+            consistency_status = {
+                is_consistent = consistency_check,
+                last_check_time = os.time()
+            },
+            case_info = {
+                active_case_id = State.active_tweet.case_id,
+                case_title = State.active_tweet.title
+            },
+            liquidops_ready = false,  -- For future implementation
+            metadata = {
+                total_deposits_processed = State.pool.deposit_count,
+                pool_creation_time = State.pool.last_deposit_time > 0 and (State.pool.last_deposit_time - State.pool.deposit_count) or 0
+            }
+        }
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(pool_info)
+        })
+    end
+)
+
+-- Handler: Get Deposit History
+Handlers.add(
+    "Get-Deposit-History",
+    Handlers.utils.hasMatchingTag("Action", "Get-Deposit-History"),
+    function(msg)
+        local limit = tonumber(msg.Tags["Limit"]) or 50  -- Default limit
+        local offset = tonumber(msg.Tags["Offset"]) or 0  -- Default offset
+        local filter_choice = msg.Tags["Vote-Choice"]  -- Optional filter
+        local filter_sender = msg.Tags["Sender"]  -- Optional filter
+        
+        -- Apply filters
+        local filtered_history = {}
+        for _, deposit in ipairs(State.deposit_history) do
+            local include = true
+            
+            if filter_choice and deposit.vote_choice ~= filter_choice then
+                include = false
+            end
+            
+            if filter_sender and deposit.sender ~= filter_sender then
+                include = false
+            end
+            
+            if include then
+                table.insert(filtered_history, deposit)
+            end
+        end
+        
+        -- Apply pagination
+        local paginated_history = {}
+        local start_idx = offset + 1
+        local end_idx = math.min(start_idx + limit - 1, #filtered_history)
+        
+        for i = start_idx, end_idx do
+            table.insert(paginated_history, filtered_history[i])
+        end
+        
+        local history_info = {
+            status = "success",
+            deposits = paginated_history,
+            pagination = {
+                total_records = #filtered_history,
+                offset = offset,
+                limit = limit,
+                returned_count = #paginated_history
+            },
+            filters_applied = {
+                vote_choice = filter_choice,
+                sender = filter_sender
+            },
+            summary = {
+                total_all_deposits = #State.deposit_history,
+                total_filtered = #filtered_history
+            }
+        }
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(history_info)
+        })
+    end
+)
+
+-- Handler: Pool Consistency Check (Admin only)
+Handlers.add(
+    "Pool-Consistency-Check",
+    Handlers.utils.hasMatchingTag("Action", "Pool-Consistency-Check"),
+    function(msg)
+        if msg.From ~= State.admin then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Unauthorized: Admin access required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        local consistency_check = validateDepositConsistency()
+        local detailed_analysis = {
+            voting_stats = State.voting_stats,
+            pool_stats = State.pool,
+            discrepancies = {}
+        }
+        
+        -- Check for discrepancies
+        if State.voting_stats.total_deposits ~= State.pool.total_balance then
+            table.insert(detailed_analysis.discrepancies, {
+                type = "total_balance_mismatch",
+                voting_total = State.voting_stats.total_deposits,
+                pool_total = State.pool.total_balance,
+                difference = addStringNumbers(State.voting_stats.total_deposits, "-" .. State.pool.total_balance)
+            })
+        end
+        
+        if State.voting_stats.true_deposited ~= State.pool.true_pool then
+            table.insert(detailed_analysis.discrepancies, {
+                type = "true_pool_mismatch",
+                voting_true = State.voting_stats.true_deposited,
+                pool_true = State.pool.true_pool
+            })
+        end
+        
+        if State.voting_stats.fake_deposited ~= State.pool.fake_pool then
+            table.insert(detailed_analysis.discrepancies, {
+                type = "fake_pool_mismatch",
+                voting_fake = State.voting_stats.fake_deposited,
+                pool_fake = State.pool.fake_pool
+            })
+        end
+        
+        local consistency_report = {
+            status = "success",
+            is_consistent = consistency_check,
+            analysis = detailed_analysis,
+            recommendations = #detailed_analysis.discrepancies > 0 and {
+                "Review deposit processing logic",
+                "Check for missed or duplicate transactions",
+                "Verify voting statistics calculation"
+            } or {"Pool is consistent with voting statistics"},
+            check_timestamp = os.time()
+        }
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(consistency_report)
+        })
+    end
+)
+
+-- Handler: Reset Pool (Admin only - for testing)
+Handlers.add(
+    "Reset-Pool",
+    Handlers.utils.hasMatchingTag("Action", "Reset-Pool"),
+    function(msg)
+        if msg.From ~= State.admin then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    error = "Unauthorized: Admin access required",
+                    status = "error"
+                })
+            })
+            return
+        end
+        
+        -- Reset pool data
+        State.pool = {
+            total_balance = "0",
+            true_pool = "0",
+            fake_pool = "0",
+            deposit_count = 0,
+            last_deposit_time = 0
+        }
+        
+        -- Clear deposit history
+        State.deposit_history = {}
+        
+        -- Also reset voting stats to maintain consistency
+        State.voting_stats = {
+            true_votes = 0,
+            fake_votes = 0,
+            true_deposited = "0",
+            fake_deposited = "0",
+            true_voters = 0,
+            fake_voters = 0,
+            total_deposits = "0",
+            unique_voters = 0
+        }
+        
+        -- Clear user votes
+        State.user_votes = {}
+        
+        print("TruthFi: Pool and voting data reset by admin")
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "Pool and voting data reset successfully",
+                timestamp = os.time()
             })
         })
     end
