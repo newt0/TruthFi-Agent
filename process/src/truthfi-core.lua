@@ -18,8 +18,9 @@ State = State or {
     -- Process metadata
     name = "TruthFi Core",
     version = "1.0.0",
-    phase = "3-1-apus-ai-integration",
+    phase = "4-1-system-integration",
     admin = Owner or "",
+    start_time = os.time(),
     
     -- QF Calculator Process integration
     qf_calculator_process = "",
@@ -2360,6 +2361,531 @@ Handlers.add(
                 message = "Pool and voting data reset successfully",
                 timestamp = os.time()
             })
+        })
+    end
+)
+
+-- ============================================================================
+-- SYSTEM INTEGRATION HANDLERS (Phase 4-1)
+-- ============================================================================
+
+-- Unified error response function
+local function sendErrorResponse(target, error_msg, error_code, context)
+    local error_response = {
+        error = error_msg,
+        status = "error",
+        timestamp = os.time()
+    }
+    
+    if error_code then
+        error_response.error_code = error_code
+    end
+    
+    if context then
+        error_response.context = context
+    end
+    
+    ao.send({
+        Target = target,
+        Data = json.encode(error_response)
+    })
+    
+    print("Error sent to " .. target .. ": " .. error_msg)
+end
+
+-- State consistency checker
+local function validateSystemConsistency()
+    local issues = {}
+    
+    -- Check voting consistency
+    if State.voting_stats.true_votes + State.voting_stats.fake_votes ~= #getUserVotesList() then
+        table.insert(issues, "Vote count mismatch")
+    end
+    
+    -- Check deposit consistency  
+    local calculated_true = safeToNumber(State.voting_stats.true_deposited) / 1000000000
+    local calculated_fake = safeToNumber(State.voting_stats.fake_deposited) / 1000000000
+    local expected_total = (State.voting_stats.true_votes + State.voting_stats.fake_votes) * 1
+    
+    if math.abs((calculated_true + calculated_fake) - expected_total) > 0.1 then
+        table.insert(issues, "Deposit total mismatch")
+    end
+    
+    -- Check SBT consistency
+    local sbt_count = 0
+    for _ in pairs(State.sbt_tokens) do
+        sbt_count = sbt_count + 1
+    end
+    
+    if sbt_count > State.voting_stats.true_votes + State.voting_stats.fake_votes then
+        table.insert(issues, "SBT count exceeds total votes")
+    end
+    
+    -- Check AI system consistency
+    if State.ai_system.evaluation_results and 
+       State.ai_system.evaluation_results.case_id ~= State.active_tweet.case_id then
+        table.insert(issues, "AI evaluation case ID mismatch")
+    end
+    
+    return {
+        consistent = #issues == 0,
+        issues = issues,
+        total_votes = State.voting_stats.true_votes + State.voting_stats.fake_votes,
+        total_deposits = calculated_true + calculated_fake,
+        sbt_count = sbt_count,
+        ai_available = State.ai_system.evaluation_results ~= nil
+    }
+end
+
+-- Complete vote processing (integrates all features)
+local function processCompleteVote(user_id, vote_type, amount)
+    local processing_steps = {}
+    local rollback_actions = {}
+    
+    -- Step 1: Validate vote
+    table.insert(processing_steps, "vote_validation")
+    local existing_vote = State.user_votes[user_id]
+    if existing_vote then
+        return false, "User has already voted", processing_steps
+    end
+    
+    if vote_type ~= "true" and vote_type ~= "fake" then
+        return false, "Invalid vote type", processing_steps
+    end
+    
+    if amount ~= 1000000000 then -- 1 USDA in Armstrongs
+        return false, "Invalid deposit amount", processing_steps
+    end
+    
+    -- Step 2: Process vote
+    table.insert(processing_steps, "vote_processing")
+    State.user_votes[user_id] = {
+        vote = vote_type,
+        amount = amount,
+        timestamp = os.time(),
+        tx_id = "integrated_vote_" .. user_id .. "_" .. os.time()
+    }
+    
+    table.insert(rollback_actions, function()
+        State.user_votes[user_id] = nil
+    end)
+    
+    -- Update voting statistics
+    if vote_type == "true" then
+        State.voting_stats.true_votes = State.voting_stats.true_votes + 1
+        State.voting_stats.true_deposited = tostring(safeToNumber(State.voting_stats.true_deposited) + amount)
+        State.voting_stats.true_voters = State.voting_stats.true_voters + 1
+    else
+        State.voting_stats.fake_votes = State.voting_stats.fake_votes + 1
+        State.voting_stats.fake_deposited = tostring(safeToNumber(State.voting_stats.fake_deposited) + amount)
+        State.voting_stats.fake_voters = State.voting_stats.fake_voters + 1
+    end
+    
+    table.insert(rollback_actions, function()
+        if vote_type == "true" then
+            State.voting_stats.true_votes = State.voting_stats.true_votes - 1
+            State.voting_stats.true_deposited = tostring(safeToNumber(State.voting_stats.true_deposited) - amount)
+            State.voting_stats.true_voters = State.voting_stats.true_voters - 1
+        else
+            State.voting_stats.fake_votes = State.voting_stats.fake_votes - 1
+            State.voting_stats.fake_deposited = tostring(safeToNumber(State.voting_stats.fake_deposited) - amount)
+            State.voting_stats.fake_voters = State.voting_stats.fake_voters - 1
+        end
+    end)
+    
+    -- Step 3: Generate Lucky Number (if RandAO available)
+    table.insert(processing_steps, "lucky_number_generation")
+    local lucky_number = nil
+    if State.randao_process_id and State.randao_process_id ~= "" then
+        -- Generate random number for SBT
+        local success, result = pcall(function()
+            local random_request = createRandomRequest()
+            if random_request then
+                local random_num = processRandomResponse(random_request, {
+                    randomness = tostring(math.random(1, 999999)),
+                    proof = "mock_proof_" .. os.time()
+                })
+                return random_num and random_num.number or math.random(1, 999999)
+            end
+            return math.random(1, 999999)
+        end)
+        
+        lucky_number = success and result or math.random(1, 999999)
+    else
+        lucky_number = math.random(1, 999999)
+    end
+    
+    -- Step 4: Create SBT
+    table.insert(processing_steps, "sbt_creation")
+    local sbt_id = "sbt_" .. user_id .. "_" .. os.time()
+    local sbt_metadata = {
+        case_id = State.active_tweet.case_id,
+        case_title = State.active_tweet.title,
+        voter_id = user_id,
+        vote_type = vote_type,
+        deposit_amount = amount,
+        vote_timestamp = os.time(),
+        lucky_number = lucky_number,
+        tweet_content = State.active_tweet.main_tweet.content,
+        tweet_author = State.active_tweet.main_tweet.username
+    }
+    
+    State.sbt_tokens[sbt_id] = {
+        id = sbt_id,
+        owner = user_id,
+        metadata = sbt_metadata,
+        created_at = os.time(),
+        status = "active"
+    }
+    
+    table.insert(rollback_actions, function()
+        State.sbt_tokens[sbt_id] = nil
+    end)
+    
+    -- Step 5: Trigger AI evaluation if not already done
+    table.insert(processing_steps, "ai_evaluation_check")
+    if State.ai_system.enabled and 
+       (not State.ai_system.evaluation_results or 
+        State.ai_system.evaluation_results.case_id ~= State.active_tweet.case_id) and
+       not State.ai_system.evaluation_in_progress then
+        
+        local ai_success, ai_result = startAIEvaluation(State.active_tweet, false)
+        if not ai_success then
+            print("Warning: AI evaluation failed to start: " .. tostring(ai_result))
+        end
+    end
+    
+    return true, {
+        sbt_id = sbt_id,
+        lucky_number = lucky_number,
+        processing_steps = processing_steps,
+        vote_stats = State.voting_stats
+    }, processing_steps, rollback_actions
+end
+
+-- Handler: Complete-Vote (Full integrated voting process)
+Handlers.add(
+    "Complete-Vote",
+    Handlers.utils.hasMatchingTag("Action", "Complete-Vote"),
+    function(msg)
+        local vote_type = msg.Tags["Vote-Type"]
+        local user_id = msg.From
+        
+        if not vote_type then
+            sendErrorResponse(msg.From, "Vote-Type tag is required", "MISSING_VOTE_TYPE")
+            return
+        end
+        
+        -- Process complete vote with all integrations
+        local success, result, steps, rollback = processCompleteVote(user_id, vote_type, 1000000000)
+        
+        if success then
+            ao.send({
+                Target = msg.From,
+                Data = json.encode({
+                    status = "success",
+                    message = "Vote processed successfully with full integration",
+                    result = result,
+                    processing_steps = steps,
+                    system_consistency = validateSystemConsistency(),
+                    timestamp = os.time()
+                })
+            })
+            
+            print("Complete vote processed for " .. user_id .. ": " .. vote_type)
+        else
+            -- Execute rollback if needed
+            if rollback then
+                for i = #rollback, 1, -1 do
+                    pcall(rollback[i])
+                end
+            end
+            
+            sendErrorResponse(msg.From, result, "VOTE_PROCESSING_ERROR", {
+                processing_steps = steps
+            })
+        end
+    end
+)
+
+-- Handler: Dashboard-Data (Unified data for UI)
+Handlers.add(
+    "Dashboard-Data",
+    Handlers.utils.hasMatchingTag("Action", "Dashboard-Data"),
+    function(msg)
+        -- Gather all system data for dashboard
+        local dashboard_data = {
+            status = "success",
+            timestamp = os.time(),
+            system_consistency = validateSystemConsistency()
+        }
+        
+        -- Tweet case information
+        dashboard_data.active_case = {
+            case_id = State.active_tweet.case_id,
+            title = State.active_tweet.title,
+            main_tweet = State.active_tweet.main_tweet,
+            reference_tweets = State.active_tweet.reference_tweets or {},
+            ai_confidence = State.active_tweet.ai_confidence
+        }
+        
+        -- Voting statistics with QF calculation
+        local qf_results = calculateQuadraticVoting()
+        dashboard_data.voting = {
+            stats = State.voting_stats,
+            quadratic_funding = qf_results,
+            pool_info = getPoolStatistics(),
+            recent_votes = getRecentVotesList(10)
+        }
+        
+        -- SBT information
+        local sbt_count = 0
+        local recent_sbts = {}
+        for sbt_id, sbt_data in pairs(State.sbt_tokens) do
+            sbt_count = sbt_count + 1
+            if #recent_sbts < 5 then
+                table.insert(recent_sbts, {
+                    id = sbt_id,
+                    owner = sbt_data.owner,
+                    vote_type = sbt_data.metadata.vote_type,
+                    lucky_number = sbt_data.metadata.lucky_number,
+                    created_at = sbt_data.created_at
+                })
+            end
+        end
+        
+        dashboard_data.sbt_system = {
+            total_issued = sbt_count,
+            recent_sbts = recent_sbts
+        }
+        
+        -- AI evaluation data
+        if State.ai_system.evaluation_results and 
+           State.ai_system.evaluation_results.case_id == State.active_tweet.case_id then
+            
+            dashboard_data.ai_evaluation = {
+                available = true,
+                true_confidence = State.ai_system.evaluation_results.true_confidence,
+                fake_confidence = State.ai_system.evaluation_results.fake_confidence,
+                evaluation_timestamp = State.ai_system.evaluation_results.evaluation_timestamp,
+                
+                -- Comparison with human voting
+                human_vs_ai = {
+                    human_true = qf_results.true_percentage,
+                    human_fake = qf_results.fake_percentage,
+                    ai_true = State.ai_system.evaluation_results.true_confidence,
+                    ai_fake = State.ai_system.evaluation_results.fake_confidence,
+                    agreement_level = math.abs(State.ai_system.evaluation_results.true_confidence - qf_results.true_percentage) < 10 and "high" or 
+                                    (math.abs(State.ai_system.evaluation_results.true_confidence - qf_results.true_percentage) < 25 and "medium" or "low")
+                }
+            }
+        else
+            dashboard_data.ai_evaluation = {
+                available = false,
+                system_enabled = State.ai_system.enabled,
+                evaluation_in_progress = State.ai_system.evaluation_in_progress
+            }
+        end
+        
+        -- System status
+        dashboard_data.system_status = {
+            process_name = State.name,
+            version = State.version,
+            phase = State.phase,
+            initialized = State.initialized,
+            integrations = {
+                qf_calculator = State.qf_calculator_process_id ~= "",
+                randao = State.randao_process_id ~= "",
+                usda_token = State.usda_token_process ~= "",
+                ai_system = State.ai_system.enabled
+            }
+        }
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(dashboard_data)
+        })
+    end
+)
+
+-- Handler: Reset-State (Development helper)
+Handlers.add(
+    "Reset-State",
+    Handlers.utils.hasMatchingTag("Action", "Reset-State"),
+    function(msg)
+        if msg.From ~= State.admin then
+            sendErrorResponse(msg.From, "Unauthorized: Admin access required", "UNAUTHORIZED")
+            return
+        end
+        
+        local reset_type = msg.Tags["Reset-Type"] or "all"
+        local backup_data = {}
+        
+        -- Create backup before reset
+        if reset_type == "all" or reset_type == "voting" then
+            backup_data.voting_stats = State.voting_stats
+            backup_data.user_votes = State.user_votes
+        end
+        
+        if reset_type == "all" or reset_type == "sbt" then
+            backup_data.sbt_tokens = State.sbt_tokens
+        end
+        
+        if reset_type == "all" or reset_type == "ai" then
+            backup_data.ai_system = State.ai_system
+        end
+        
+        -- Perform reset
+        if reset_type == "all" then
+            -- Reset everything except configuration
+            State.voting_stats = {
+                true_votes = 0,
+                fake_votes = 0,
+                true_deposited = "0",
+                fake_deposited = "0",
+                true_voters = 0,
+                fake_voters = 0
+            }
+            State.user_votes = {}
+            State.sbt_tokens = {}
+            State.ai_system.evaluation_results = {}
+            State.ai_system.pending_evaluations = {}
+            State.ai_system.evaluation_in_progress = false
+            State.ai_system.request_count = 0
+            
+            -- Reload sample data
+            pcall(loadSampleTweet)
+            
+        elseif reset_type == "voting" then
+            State.voting_stats = {
+                true_votes = 0,
+                fake_votes = 0,
+                true_deposited = "0",
+                fake_deposited = "0",
+                true_voters = 0,
+                fake_voters = 0
+            }
+            State.user_votes = {}
+            
+        elseif reset_type == "sbt" then
+            State.sbt_tokens = {}
+            
+        elseif reset_type == "ai" then
+            State.ai_system.evaluation_results = {}
+            State.ai_system.pending_evaluations = {}
+            State.ai_system.evaluation_in_progress = false
+            State.ai_system.request_count = 0
+        end
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode({
+                status = "success",
+                message = "State reset completed: " .. reset_type,
+                backup_created = backup_data,
+                new_consistency_check = validateSystemConsistency(),
+                timestamp = os.time()
+            })
+        })
+        
+        print("State reset (" .. reset_type .. ") completed by admin")
+    end
+)
+
+-- Handler: Debug-Info (Development debugging)
+Handlers.add(
+    "Debug-Info",
+    Handlers.utils.hasMatchingTag("Action", "Debug-Info"),
+    function(msg)
+        local debug_info = {
+            status = "success",
+            timestamp = os.time(),
+            consistency_check = validateSystemConsistency()
+        }
+        
+        -- Internal state debugging
+        debug_info.state_overview = {
+            active_tweet_id = State.active_tweet.case_id,
+            total_votes = State.voting_stats.true_votes + State.voting_stats.fake_votes,
+            total_deposits = (safeToNumber(State.voting_stats.true_deposited) + safeToNumber(State.voting_stats.fake_deposited)) / 1000000000,
+            sbt_count = 0,
+            ai_evaluation_available = State.ai_system.evaluation_results ~= nil
+        }
+        
+        -- Count SBTs
+        for _ in pairs(State.sbt_tokens) do
+            debug_info.state_overview.sbt_count = debug_info.state_overview.sbt_count + 1
+        end
+        
+        -- System integrations status
+        debug_info.integrations_debug = {
+            qf_calculator = {
+                process_id = State.qf_calculator_process_id,
+                connected = State.qf_calculator_process_id ~= ""
+            },
+            randao = {
+                process_id = State.randao_process_id,
+                connected = State.randao_process_id ~= ""
+            },
+            usda_token = {
+                process_id = State.usda_token_process,
+                connected = State.usda_token_process ~= ""
+            },
+            ai_system = {
+                enabled = State.ai_system.enabled,
+                in_progress = State.ai_system.evaluation_in_progress,
+                total_requests = State.ai_system.request_count,
+                pending_evaluations = 0
+            }
+        }
+        
+        -- Count pending AI evaluations
+        for _ in pairs(State.ai_system.pending_evaluations) do
+            debug_info.integrations_debug.ai_system.pending_evaluations = 
+                debug_info.integrations_debug.ai_system.pending_evaluations + 1
+        end
+        
+        -- Recent activity (last 5 votes)
+        debug_info.recent_activity = {
+            votes = {},
+            sbts = {}
+        }
+        
+        local vote_count = 0
+        for user_id, vote_data in pairs(State.user_votes) do
+            if vote_count < 5 then
+                table.insert(debug_info.recent_activity.votes, {
+                    user = user_id,
+                    vote = vote_data.vote,
+                    timestamp = vote_data.timestamp
+                })
+                vote_count = vote_count + 1
+            end
+        end
+        
+        local sbt_count = 0
+        for sbt_id, sbt_data in pairs(State.sbt_tokens) do
+            if sbt_count < 5 then
+                table.insert(debug_info.recent_activity.sbts, {
+                    id = sbt_id,
+                    owner = sbt_data.owner,
+                    lucky_number = sbt_data.metadata.lucky_number,
+                    created_at = sbt_data.created_at
+                })
+                sbt_count = sbt_count + 1
+            end
+        end
+        
+        -- Performance metrics
+        debug_info.performance = {
+            state_size_estimate = 0,  -- Could implement actual size calculation
+            handler_count = 0,        -- Could count registered handlers
+            uptime_estimate = State.initialized and (os.time() - (State.start_time or os.time())) or 0
+        }
+        
+        ao.send({
+            Target = msg.From,
+            Data = json.encode(debug_info)
         })
     end
 )
